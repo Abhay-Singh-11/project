@@ -1,1 +1,1 @@
-# badges
+for educational purpose only 
