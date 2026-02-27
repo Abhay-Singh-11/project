@@ -438,6 +438,124 @@ with st.spinner("📡 Fetching market data..."):
     sectors   = fetch_sectors()
     oi_data   = fetch_oi_ratio()
 
+# ─────────────────────────────────────────────
+# MANUAL OVERRIDE PANEL
+# ─────────────────────────────────────────────
+with st.expander("🛠️ Manual Data Override — Edit any fetched value or fill missing data", expanded=False):
+    st.caption("All fields are pre-filled with fetched data. Edit any value you're not satisfied with, or fill in data that failed to fetch.")
+
+    ov_col1, ov_col2 = st.columns(2)
+
+    # ── VIX Override ──
+    with ov_col1:
+        st.markdown("**🌡️ India VIX**")
+        vix_fetched = vix_tuple[0]
+        vix_prev_fetched = vix_tuple[1]
+        vix_override = st.number_input(
+            "VIX Value",
+            min_value=0.0, max_value=100.0, step=0.01,
+            value=float(vix_fetched) if vix_fetched else 0.0,
+            key="ov_vix",
+            help="Fetched automatically. Override if value looks wrong."
+        )
+        vix_prev_override = st.number_input(
+            "VIX Prev Close",
+            min_value=0.0, max_value=100.0, step=0.01,
+            value=float(vix_prev_fetched) if vix_prev_fetched else 0.0,
+            key="ov_vix_prev",
+        )
+        if vix_fetched:
+            st.caption(f"✅ Fetched: {vix_fetched} (prev: {vix_prev_fetched})")
+        else:
+            st.caption("⚠️ Fetch failed — please enter manually")
+
+    # ── OI Ratio Override ──
+    with ov_col2:
+        st.markdown("**📈 OI Ratio (Put/Call)**")
+        oi_fetched_ratio   = oi_data[0] if oi_data else None
+        oi_fetched_put     = oi_data[1] if oi_data else 0
+        oi_fetched_call    = oi_data[2] if oi_data else 0
+        oi_fetched_expiry  = oi_data[3] if oi_data else ""
+        oi_fetched_spot    = oi_data[4] if oi_data else 0.0
+
+        oi_put_override  = st.number_input("Put OI",  min_value=0, step=1000,
+                                            value=int(oi_fetched_put),  key="ov_put_oi")
+        oi_call_override = st.number_input("Call OI", min_value=0, step=1000,
+                                            value=int(oi_fetched_call), key="ov_call_oi")
+        oi_expiry_override = st.text_input("Expiry Date", value=oi_fetched_expiry or "", key="ov_expiry")
+        oi_spot_override   = st.number_input("Nifty Spot", min_value=0.0, step=0.5,
+                                              value=float(oi_fetched_spot) if oi_fetched_spot and oi_fetched_spot != "N/A" else 0.0,
+                                              key="ov_spot")
+        if oi_fetched_ratio:
+            st.caption(f"✅ Fetched ratio: {oi_fetched_ratio}")
+        else:
+            st.caption("⚠️ Fetch failed — please enter Put OI & Call OI manually")
+
+    st.divider()
+    ov_col3, ov_col4 = st.columns(2)
+
+    # ── Top 10 Stocks Override ──
+    with ov_col3:
+        st.markdown("**📊 Nifty Top 10 — % Change**")
+        top10_overrides = {}
+        for ticker in NIFTY_TOP10:
+            name = ticker.replace(".NS", "")
+            fetched_val = top10.get(name)
+            top10_overrides[name] = st.number_input(
+                name,
+                min_value=-20.0, max_value=20.0, step=0.01, format="%.2f",
+                value=float(fetched_val) if fetched_val is not None else 0.0,
+                key=f"ov_top10_{name}",
+                help=f"Fetched: {fetched_val}%" if fetched_val is not None else "Not fetched"
+            )
+        if top10:
+            st.caption(f"✅ Fetched {len([v for v in top10.values() if v is not None])}/10 stocks")
+        else:
+            st.caption("⚠️ Fetch failed — enter % changes manually")
+
+    # ── Sectors Override ──
+    with ov_col4:
+        st.markdown("**🏭 Sector % Change**")
+        sector_overrides = {}
+        for sector in SECTOR_INDICES:
+            fetched_val = sectors.get(sector)
+            sector_overrides[sector] = st.number_input(
+                sector,
+                min_value=-20.0, max_value=20.0, step=0.01, format="%.2f",
+                value=float(fetched_val) if fetched_val is not None else 0.0,
+                key=f"ov_sec_{sector}",
+                help=f"Fetched: {fetched_val}%" if fetched_val is not None else "Not fetched"
+            )
+        if sectors:
+            st.caption(f"✅ Fetched {len([v for v in sectors.values() if v is not None])}/10 sectors")
+        else:
+            st.caption("⚠️ Fetch failed — enter % changes manually")
+
+# ── Apply overrides: replace fetched data with user-edited values ──
+# VIX
+_vix_val  = st.session_state.get("ov_vix",      vix_tuple[0])
+_vix_prev = st.session_state.get("ov_vix_prev", vix_tuple[1])
+vix_tuple = (_vix_val if _vix_val != 0.0 else None,
+             _vix_prev if _vix_prev != 0.0 else None)
+
+# Top 10
+_top10_ov = {n: st.session_state.get(f"ov_top10_{n}") for n in [t.replace(".NS","") for t in NIFTY_TOP10]}
+top10 = {k: v for k, v in _top10_ov.items()}
+
+# Sectors
+_sec_ov = {s: st.session_state.get(f"ov_sec_{s}") for s in SECTOR_INDICES}
+sectors = {k: v for k, v in _sec_ov.items()}
+
+# OI
+_put  = st.session_state.get("ov_put_oi",  oi_fetched_put  if oi_data else 0)
+_call = st.session_state.get("ov_call_oi", oi_fetched_call if oi_data else 0)
+_exp  = st.session_state.get("ov_expiry",  oi_fetched_expiry if oi_data else "")
+_spot = st.session_state.get("ov_spot",    float(oi_fetched_spot) if (oi_data and oi_data[4] != "N/A") else 0.0)
+if _put > 0 and _call > 0:
+    oi_data = (round(_put / _call, 3), _put, _call, _exp, _spot)
+else:
+    oi_data = None
+
 # ── Route by status ──
 if status == "live":
     st.success("🟢 **Market LIVE** — Data refreshes every 5 min")
