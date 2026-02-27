@@ -75,5 +75,4 @@ def trading_signal(nifty_direction, pcr, adv_dec, sector_direction):
 
 # Example usage
 adv_dec_data = {"advances": 30, "declines": 20}
->>>>>>> d18cc7d37fe4a2d9f15f104657049eac4a5a3ec8
 print(trading_signal("Bullish", 0.85, adv_dec_data, "Neutral"))

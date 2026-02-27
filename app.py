@@ -30,18 +30,6 @@ SECTOR_INDICES = {
 
 IST = pytz.timezone("Asia/Kolkata")
 
-CHECKLIST = [
-    ("Check India VIX",             "Below 15 = safe. 15–20 = reduce size. Above 20 = stay flat."),
-    ("Check GIFT Nifty",            "Pre-market direction indicator. Large gap = cautious entry."),
-    ("Mark Support & Resistance",   "Draw key S/R on 15-min chart before open."),
-    ("Check economic calendar",     "Any RBI, CPI, Fed, or major earnings events today?"),
-    ("Confirm margin available",    "Keep 20–30% buffer. Never max out margin."),
-    ("Choose strategy for the day", "Iron Condor / Strangle / Bull Put / Bear Call — decide now."),
-    ("Define stop-loss level",      "2× premium received = exit. Set trigger order before entry."),
-    ("Set daily loss limit",        "If total P&L hits −X today, I stop. Decide the number now."),
-    ("Plan entry window",           "No trades before 9:30 AM. Best window: 9:30–10:30 AM."),
-    ("Set 3:20 PM exit reminder",   "All positions closed by 3:20 PM. No exceptions."),
-]
 
 # ─────────────────────────────────────────────
 # TIME HELPERS
@@ -299,6 +287,167 @@ def get_param_signals(details, vix_label, vix_blocked):
 
 
 
+def get_strike_recommendation(spot, vix, trade_type, score, lot_size=50):
+    """
+    Given Nifty spot, VIX, trade direction and score — recommend exact strikes to sell.
+    Uses delta approximation: for Nifty options, 1 std dev ≈ spot * (vix/100) * sqrt(dte/365)
+    Delta bands are mapped to % OTM distances empirically.
+    """
+    if spot is None or spot == 0 or spot == "N/A":
+        return None
+
+    spot = float(spot)
+    vix  = float(vix) if vix else 15.0  # default safe VIX assumption
+
+    # Round spot to nearest 50 (Nifty strike interval)
+    atm = round(spot / 50) * 50
+
+    # Delta guidance based on score + VIX
+    if vix > 20:
+        delta_target = 0.10   # Far OTM when VIX high
+        delta_label  = "~0.10Δ (far OTM — VIX danger)"
+    elif vix > 15:
+        delta_target = 0.15
+        delta_label  = "~0.15Δ (OTM — VIX elevated)"
+    elif score >= 80:
+        delta_target = 0.35
+        delta_label  = "~0.30–0.40Δ (closer — strong signal)"
+    elif score >= 65:
+        delta_target = 0.25
+        delta_label  = "~0.25Δ (moderate conviction)"
+    else:
+        delta_target = 0.15
+        delta_label  = "~0.15Δ (low conviction — go far OTM)"
+
+    # Distance from ATM as % of spot: rough mapping delta → % OTM
+    # Based on Black-Scholes intuition: 0.30Δ ≈ 1.5%, 0.20Δ ≈ 2.5%, 0.10Δ ≈ 4%
+    delta_to_pct = {0.35: 0.012, 0.30: 0.015, 0.25: 0.022, 0.15: 0.035, 0.10: 0.045}
+    # Find closest key
+    closest_key  = min(delta_to_pct.keys(), key=lambda k: abs(k - delta_target))
+    pct_otm      = delta_to_pct[closest_key]
+    distance     = round((spot * pct_otm) / 50) * 50  # round to nearest strike
+
+    pe_strike = int(atm - distance)   # Put to sell (below ATM)
+    ce_strike = int(atm + distance)   # Call to sell (above ATM)
+
+    # Spread legs (50 points wide for budget, 100 for normal)
+    pe_buy = pe_strike - 50
+    ce_buy = ce_strike + 50
+
+    results = {
+        "spot":        spot,
+        "atm":         atm,
+        "vix":         vix,
+        "delta_target": delta_target,
+        "delta_label": delta_label,
+        "distance":    distance,
+        "lot_size":    lot_size,
+    }
+
+    if trade_type in ("BULLISH", "FLAT"):
+        results["pe_sell"]   = pe_strike
+        results["pe_buy"]    = pe_buy
+        results["pe_spread"] = f"Bull Put Spread: Sell {pe_strike}PE / Buy {pe_buy}PE"
+    if trade_type in ("BEARISH", "FLAT"):
+        results["ce_sell"]   = ce_strike
+        results["ce_buy"]    = ce_buy
+        results["ce_spread"] = f"Bear Call Spread: Sell {ce_strike}CE / Buy {ce_buy}CE"
+
+    return results
+
+
+def render_strike_calculator(spot, vix, trade, score):
+    """Render the strike price recommendation panel."""
+    st.divider()
+    st.subheader("🎯 Strike Price & Delta Selector")
+
+    if trade["type"] == "BLOCKED":
+        st.error("🚫 VIX too high — no strike recommendations. Stay flat.")
+        return
+
+    # Allow spot override
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        spot_input = st.number_input(
+            "Nifty Spot Price",
+            min_value=10000.0, max_value=50000.0, step=50.0,
+            value=float(spot) if spot and spot != "N/A" else 22000.0,
+            key="strike_spot",
+            help="Auto-filled from fetched data. Edit if needed."
+        )
+    with col2:
+        lot_size = st.number_input("Lot Size", min_value=1, value=75, step=1,
+                                    key="strike_lot",
+                                    help="Nifty lot size (currently 75 after Nov 2024 change)")
+    with col3:
+        expiry_days = st.number_input("Days to Expiry (DTE)", min_value=1, max_value=30,
+                                       value=7, step=1, key="strike_dte",
+                                       help="Weekly = ~7 days, Monthly = ~25–30 days")
+
+    trade_type = "FLAT" if trade["type"] == "FLAT" else (
+        "BULLISH" if "PUT" in trade["message"] or "Bullish" in trade["message"] else "BEARISH"
+    )
+
+    rec = get_strike_recommendation(spot_input, vix, trade_type, score, lot_size)
+
+    if not rec:
+        st.warning("Enter a valid Nifty spot price to get strike recommendations.")
+        return
+
+    atm = rec["atm"]
+    st.caption(f"ATM Strike: **{atm}** | Spot: **{spot_input}** | Target Delta: **{rec['delta_label']}**")
+
+    # ── Strike cards ──
+    if trade_type == "BULLISH":
+        st.success(f"### 🟢 Sell PUT Side (Bullish)")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Sell Strike (PE)", f"{rec['pe_sell']} PE",
+                  delta=f"{rec['pe_sell'] - atm:+d} from ATM")
+        c2.metric("Buy Strike (hedge)", f"{rec['pe_buy']} PE")
+        c3.metric("Spread Width", "50 pts")
+        st.info(f"**{rec['pe_spread']}**")
+        st.caption(f"Strike is {abs(rec['pe_sell'] - atm)} pts below ATM "
+                   f"({abs(rec['pe_sell'] - spot_input)/spot_input*100:.1f}% OTM)")
+
+    elif trade_type == "BEARISH":
+        st.error(f"### 🔴 Sell CALL Side (Bearish)")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Sell Strike (CE)", f"{rec['ce_sell']} CE",
+                  delta=f"{rec['ce_sell'] - atm:+d} from ATM")
+        c2.metric("Buy Strike (hedge)", f"{rec['ce_buy']} CE")
+        c3.metric("Spread Width", "50 pts")
+        st.info(f"**{rec['ce_spread']}**")
+        st.caption(f"Strike is {abs(rec['ce_sell'] - atm)} pts above ATM "
+                   f"({abs(rec['ce_sell'] - spot_input)/spot_input*100:.1f}% OTM)")
+
+    else:  # FLAT — Iron Condor
+        st.warning(f"### ⚖️ Sell BOTH Sides (Iron Condor)")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Sell PE", f"{rec['pe_sell']} PE", delta=f"{rec['pe_sell']-atm:+d}")
+        c2.metric("Buy PE", f"{rec['pe_buy']} PE")
+        c3.metric("Sell CE", f"{rec['ce_sell']} CE", delta=f"{rec['ce_sell']-atm:+d}")
+        c4.metric("Buy CE", f"{rec['ce_buy']} CE")
+        st.info(f"**Iron Condor:**  {rec['pe_spread']}  +  {rec['ce_spread']}")
+        st.caption(
+            f"PE leg: {abs(rec['pe_sell']-atm)} pts below ATM | "
+            f"CE leg: {abs(rec['ce_sell']-atm)} pts above ATM | "
+            f"Total range: {rec['pe_sell']} – {rec['ce_sell']}"
+        )
+
+    # ── Delta + VIX context ──
+    with st.expander("ℹ️ Why this strike? Delta & VIX logic explained"):
+        st.markdown(f"""
+| Factor | Value | Impact |
+|--------|-------|--------|
+| VIX | {rec['vix']} | {'🔴 High — forced far OTM' if rec['vix'] > 20 else ('🟡 Elevated — conservative' if rec['vix'] > 15 else '🟢 Normal — standard delta')} |
+| Score | {score:.1f}/100 | {'High conviction → tighter delta' if score >= 70 else 'Lower conviction → farther OTM'} |
+| Target Delta | {rec['delta_target']}Δ | Probability of expiring ITM ≈ {int(rec['delta_target']*100)}% |
+| Distance from ATM | {rec['distance']} pts | {abs(rec['distance'])/spot_input*100:.1f}% OTM |
+| Lot Size | {lot_size} | Max lots = margin / (spread width × lot size) |
+""")
+        st.caption("⚠️ These are guideline strikes. Always verify with your broker's option chain and actual Greeks before entering.")
+
+
 def color_signal(label, text):
     if "Bullish" in text:   st.markdown(f"**{label}:** :green[{text}]")
     elif "Bearish" in text: st.markdown(f"**{label}:** :red[{text}]")
@@ -350,32 +499,6 @@ def render_data_cards(vix_tuple, top10, sectors, oi_data, heading):
                                    for k, v in sectors.items()], columns=["Sector", "Change"])
                 st.dataframe(df, use_container_width=True, hide_index=True)
 
-
-def render_checklist():
-    st.subheader("✅ Pre-Market Preparation Checklist")
-    st.caption("Work through this before 9:30 AM. Click each item to check it off.")
-
-    if "checklist_state" not in st.session_state:
-        st.session_state.checklist_state = [False] * len(CHECKLIST)
-
-    done = sum(st.session_state.checklist_state)
-    st.progress(done / len(CHECKLIST), text=f"{done} / {len(CHECKLIST)} completed")
-    st.write("")
-
-    for i, (title, desc) in enumerate(CHECKLIST):
-        checked = st.checkbox(
-            f"**{title}** — {desc}",
-            value=st.session_state.checklist_state[i],
-            key=f"chk_{i}"
-        )
-        st.session_state.checklist_state[i] = checked
-
-    if done == len(CHECKLIST):
-        st.success("🎯 All checks done! You're ready for the session.")
-
-    if st.button("🔄 Reset Checklist"):
-        st.session_state.checklist_state = [False] * len(CHECKLIST)
-        st.rerun()
 
 
 def render_live_scoring(vix_tuple, top10, sectors, oi_data):
@@ -475,6 +598,10 @@ def render_live_scoring(vix_tuple, top10, sectors, oi_data):
         elif trade["type"] == "DIRECTIONAL":  st.success(trade["message"])
         else:                                 st.warning(trade["message"])
         st.info(f"**Suggested Delta:** {trade['delta']}")
+
+        # ── Strike Price & Delta Selector ──
+        spot_for_strike = oi_data[4] if oi_data and oi_data[4] != "N/A" else None
+        render_strike_calculator(spot_for_strike, vix, trade, final_score)
 
         # ── Per-parameter option scoring ──
         st.divider()
@@ -702,8 +829,6 @@ if status == "live":
 elif status == "opening":
     st.warning("🟡 **Opening Phase (9:15–9:30 AM)** — Wait before trading. Checking data is fine.")
     render_data_cards(vix_tuple, top10, sectors, oi_data, "📡 Today's Opening Data")
-    st.divider()
-    render_checklist()
 
 elif status == "closing":
     st.error("🔴 **After 3:20 PM — Square off ALL positions now. No new entries.**")
@@ -713,16 +838,12 @@ elif status == "pre":
     st.info(f"🕐 **Pre-Market** — Market opens at 09:15 AM. Showing last session data.")
     day = last_trading_day_label()
     render_data_cards(vix_tuple, top10, sectors, oi_data, f"📅 Last Session Data ({day})")
-    st.divider()
-    render_checklist()
 
 elif status in ("closed", "weekend"):
     label = "Weekend" if status == "weekend" else "Market Closed"
     st.info(f"🔒 **{label}** — Next session: {next_market_open()}")
     day = last_trading_day_label()
     render_data_cards(vix_tuple, top10, sectors, oi_data, f"📅 Last Session Data ({day})")
-    st.divider()
-    render_checklist()
 
 # ── Footer ──
 st.divider()
