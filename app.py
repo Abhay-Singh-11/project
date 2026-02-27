@@ -502,9 +502,40 @@ def render_data_cards(vix_tuple, top10, sectors, oi_data, heading):
 
 
 def render_live_scoring(vix_tuple, top10, sectors, oi_data):
-    vix      = vix_tuple[0]
+    vix = vix_tuple[0]
 
-    # ── PCR Source Toggle (your original approach) ──
+    # ── ALWAYS-VISIBLE INPUT SECTION ──
+    st.divider()
+    st.subheader("📥 Inputs")
+
+    inp_col1, inp_col2, inp_col3 = st.columns(3)
+
+    # Spot price — always visible, auto-filled if available
+    fetched_spot = oi_data[4] if oi_data and oi_data[4] not in (None, "N/A", 0) else None
+    with inp_col1:
+        spot_input = st.number_input(
+            "📍 Nifty Spot Price",
+            min_value=10000.0, max_value=50000.0, step=50.0,
+            value=float(fetched_spot) if fetched_spot else 22000.0,
+            key="spot_input",
+            help="Auto-filled from fetch. Edit if wrong — this drives strike calculation."
+        )
+        if fetched_spot:
+            st.caption(f"✅ Auto-filled: {fetched_spot}")
+        else:
+            st.caption("⚠️ Not fetched — using default. Please enter current Nifty spot.")
+
+    with inp_col2:
+        lot_size = st.number_input("📦 Lot Size", min_value=1, value=75, step=1,
+                                    key="lot_size_input",
+                                    help="Nifty lot size is currently 75 (changed Nov 2024)")
+
+    with inp_col3:
+        dte_input = st.number_input("📅 Days to Expiry (DTE)", min_value=1, max_value=30,
+                                     value=7, step=1, key="dte_input",
+                                     help="Weekly expiry ≈ 7 days | Monthly ≈ 25–30 days")
+
+    # ── PCR Source Toggle ──
     st.divider()
     st.subheader("📈 PCR Source")
     use_live_pcr = st.toggle("🔴 Use Live NSE PCR (direct from NSE option chain)", value=True,
@@ -533,8 +564,8 @@ def render_live_scoring(vix_tuple, top10, sectors, oi_data):
 
     # ── Advance-Decline ──
     st.divider()
-    st.subheader("⌨️ Manual Input: Advance-Decline")
-    st.caption("No free public API available — get from [nseindia.com](https://www.nseindia.com) → Market → Advances/Declines")
+    st.subheader("⌨️ Advance-Decline")
+    st.caption("No free public API — get from [nseindia.com](https://www.nseindia.com) → Market → Advances/Declines")
     col_a, col_b = st.columns(2)
     with col_a:
         advances = st.number_input("🟢 Advances", min_value=0, value=0, step=1)
@@ -544,12 +575,12 @@ def render_live_scoring(vix_tuple, top10, sectors, oi_data):
     st.divider()
     if st.button("🚀 Calculate Sentiment & Get Trade Signal", type="primary"):
 
-        vix_adj, vix_label              = score_vix(vix)
-        vix_blocked                     = vix_adj == -999
-        s_nifty, l_nifty, n_up, n_down  = score_nifty_breadth(top10)
-        s_oi,    l_oi                   = score_oi_ratio(oi_ratio)
-        s_adv,   l_adv                  = score_adv_dec(advances, declines)
-        s_sec,   l_sec, sec_up, sec_dn  = score_sectors(sectors)
+        vix_adj, vix_label             = score_vix(vix)
+        vix_blocked                    = vix_adj == -999
+        s_nifty, l_nifty, n_up, n_down = score_nifty_breadth(top10)
+        s_oi,    l_oi                  = score_oi_ratio(oi_ratio)
+        s_adv,   l_adv                 = score_adv_dec(advances, declines)
+        s_sec,   l_sec, sec_up, sec_dn = score_sectors(sectors)
 
         final_score = max(0, s_nifty + s_oi + s_adv + s_sec + (vix_adj if not vix_blocked else 0))
 
@@ -559,13 +590,6 @@ def render_live_scoring(vix_tuple, top10, sectors, oi_data):
             "Advance-Decline": l_adv,
             "Sector Heatmap":  l_sec,
         }
-
-        # ── Breakdown ──
-        st.subheader("📌 Signal Breakdown")
-        for k, v in details.items():
-            color_signal(k, v)
-        vix_color = "red" if vix_blocked else ("orange" if "Elevated" in vix_label else "green")
-        st.markdown(f"**VIX Filter:** :{vix_color}[{vix_label}]")
 
         # ── Score ──
         st.divider()
@@ -592,32 +616,122 @@ def render_live_scoring(vix_tuple, top10, sectors, oi_data):
 
         # ── Overall trade recommendation ──
         st.divider()
-        st.subheader("🎯 Overall Trade Recommendation")
+        st.subheader("🎯 Trade Recommendation")
         trade = get_trade_recommendation(final_score, details, vix_blocked)
         if trade["type"] == "BLOCKED":        st.error(trade["message"])
         elif trade["type"] == "DIRECTIONAL":  st.success(trade["message"])
         else:                                 st.warning(trade["message"])
         st.info(f"**Suggested Delta:** {trade['delta']}")
 
-        # ── Strike Price & Delta Selector ──
-        spot_for_strike = oi_data[4] if oi_data and oi_data[4] != "N/A" else None
-        render_strike_calculator(spot_for_strike, vix, trade, final_score)
+        # ── STRIKE PRICE RECOMMENDATION — prominent, immediately after trade call ──
+        if not vix_blocked:
+            st.divider()
+            st.subheader("🎯 Which Strike to Sell")
+
+            atm = round(spot_input / 50) * 50
+
+            # Delta target based on VIX + score
+            if vix and vix > 20:
+                delta_target, delta_label = 0.10, "~0.10Δ — VIX danger, go very far OTM"
+            elif vix and vix > 15:
+                delta_target, delta_label = 0.15, "~0.15Δ — VIX elevated, stay conservative"
+            elif final_score >= 80:
+                delta_target, delta_label = 0.35, "~0.30–0.40Δ — strong signal, tighter strike"
+            elif final_score >= 65:
+                delta_target, delta_label = 0.25, "~0.25Δ — decent conviction"
+            else:
+                delta_target, delta_label = 0.15, "~0.15Δ — low conviction, far OTM"
+
+            # % OTM distance per delta target
+            pct_map = {0.35: 0.012, 0.25: 0.022, 0.15: 0.035, 0.10: 0.045}
+            closest = min(pct_map, key=lambda k: abs(k - delta_target))
+            distance = round((spot_input * pct_map[closest]) / 50) * 50
+
+            pe_sell = int(atm - distance)
+            ce_sell = int(atm + distance)
+            pe_buy  = pe_sell - 50
+            ce_buy  = ce_sell + 50
+
+            trade_type = "FLAT" if trade["type"] == "FLAT" else (
+                "BULLISH" if ("PUT" in trade["message"] or "Bullish" in trade["message"]) else "BEARISH"
+            )
+
+            # Big clear strike display
+            st.markdown(f"**Spot:** `{spot_input}` → **ATM:** `{atm}` → **Target Delta:** `{delta_label}`")
+            st.markdown("")
+
+            if trade_type == "BULLISH":
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("✅ Sell This Strike", f"{pe_sell} PE",
+                          delta=f"{pe_sell - atm:+d} from ATM")
+                c2.metric("🛡️ Hedge (Buy)", f"{pe_buy} PE")
+                c3.metric("OTM Distance", f"{distance} pts")
+                c4.metric("% OTM", f"{distance/spot_input*100:.1f}%")
+                st.success(f"### Sell **{pe_sell} PE** / Buy **{pe_buy} PE**  (Bull Put Spread)")
+                st.caption(f"Strike is {distance} pts ({distance/spot_input*100:.1f}%) below ATM | Delta ≈ {delta_target}Δ")
+
+            elif trade_type == "BEARISH":
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("✅ Sell This Strike", f"{ce_sell} CE",
+                          delta=f"{ce_sell - atm:+d} from ATM")
+                c2.metric("🛡️ Hedge (Buy)", f"{ce_buy} CE")
+                c3.metric("OTM Distance", f"{distance} pts")
+                c4.metric("% OTM", f"{distance/spot_input*100:.1f}%")
+                st.error(f"### Sell **{ce_sell} CE** / Buy **{ce_buy} CE**  (Bear Call Spread)")
+                st.caption(f"Strike is {distance} pts ({distance/spot_input*100:.1f}%) above ATM | Delta ≈ {delta_target}Δ")
+
+            else:  # Iron Condor
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("✅ Sell PE", f"{pe_sell} PE", delta=f"{pe_sell-atm:+d}")
+                c2.metric("🛡️ Buy PE", f"{pe_buy} PE")
+                c3.metric("✅ Sell CE", f"{ce_sell} CE", delta=f"{ce_sell-atm:+d}")
+                c4.metric("🛡️ Buy CE", f"{ce_buy} CE")
+                st.warning(
+                    f"### Iron Condor:  Sell **{pe_sell} PE** + Sell **{ce_sell} CE**\n\n"
+                    f"Hedge: Buy **{pe_buy} PE** + Buy **{ce_buy} CE**"
+                )
+                st.caption(
+                    f"PE leg {distance} pts below ATM | CE leg {distance} pts above ATM | "
+                    f"Profit zone: {pe_sell} – {ce_sell} ({ce_sell - pe_sell} pts wide)"
+                )
+
+            with st.expander("ℹ️ Why this strike? — Delta & VIX logic"):
+                st.markdown(f"""
+| Factor | Value | Effect on Strike |
+|--------|-------|-----------------|
+| Nifty Spot | {spot_input} | ATM = {atm} |
+| VIX | {vix or 'N/A'} | {'🔴 High → forced far OTM' if (vix and vix > 20) else ('🟡 Elevated → conservative' if (vix and vix > 15) else '🟢 Normal → standard delta')} |
+| Score | {final_score:.1f}/100 | {'High conviction → tighter' if final_score >= 70 else 'Low conviction → farther'} |
+| Target Delta | {delta_target}Δ | ~{int(delta_target*100)}% chance of expiring ITM |
+| OTM Distance | {distance} pts | {distance/spot_input*100:.1f}% from spot |
+""")
+                st.caption("⚠️ Guideline strikes only. Verify with live option chain and actual Greeks before trading.")
+        else:
+            st.divider()
+            st.error("🚫 VIX too high — no strike recommendations. Stay completely flat today.")
+
+        # ── Signal Breakdown ──
+        st.divider()
+        st.subheader("📌 Signal Breakdown")
+        for k, v in details.items():
+            color_signal(k, v)
+        vix_color = "red" if vix_blocked else ("orange" if "Elevated" in vix_label else "green")
+        st.markdown(f"**VIX Filter:** :{vix_color}[{vix_label}]")
 
         # ── Per-parameter option scoring ──
         st.divider()
         st.subheader("📋 Per-Parameter Option Signal")
-        st.caption("What each individual indicator is telling you to sell — useful when signals conflict.")
+        st.caption("What each individual indicator is suggesting — useful when signals conflict.")
 
         param_rows = get_param_signals(details, vix_label, vix_blocked)
-        df_params = pd.DataFrame(param_rows)
+        df_params  = pd.DataFrame(param_rows)
 
-        # Style the dataframe with color highlighting
         def highlight_signal(val):
             if "🟢" in str(val) or "Bullish" in str(val) or "PE" in str(val):
                 return "background-color: #0d2e1e; color: #00e5a0"
             elif "🔴" in str(val) or "Bearish" in str(val) or "CE" in str(val):
                 return "background-color: #2e0d1a; color: #ff4444"
-            elif "🚫" in str(val) or "FLAT" in str(val) or "DANGER" in str(val):
+            elif "🚫" in str(val) or "DANGER" in str(val):
                 return "background-color: #2e1a0d; color: #ff8800"
             elif "🟡" in str(val) or "Neutral" in str(val) or "both" in str(val):
                 return "background-color: #2a2a0d; color: #ffd700"
@@ -626,18 +740,15 @@ def render_live_scoring(vix_tuple, top10, sectors, oi_data):
         styled = df_params.style.applymap(highlight_signal, subset=["Signal", "Option Action"])
         st.dataframe(styled, use_container_width=True, hide_index=True)
 
-        # ── Vote summary ──
         votes = {"Sell PE 🟢": 0, "Sell CE 🔴": 0, "Both sides 🟡": 0, "FLAT 🚫": 0}
         for row in param_rows:
             act = row["Option Action"]
-            if "FLAT" in act or "DANGER" in act:  votes["FLAT 🚫"] += 1
-            elif "PE" in act:                      votes["Sell PE 🟢"] += 1
-            elif "CE" in act:                      votes["Sell CE 🔴"] += 1
-            else:                                  votes["Both sides 🟡"] += 1
-
+            if "FLAT" in act or "DANGER" in act: votes["FLAT 🚫"] += 1
+            elif "PE" in act:                     votes["Sell PE 🟢"] += 1
+            elif "CE" in act:                     votes["Sell CE 🔴"] += 1
+            else:                                 votes["Both sides 🟡"] += 1
         st.caption("**Signal Vote Count:**  " + "  |  ".join(
-            f"{k}: **{v}**" for k, v in votes.items() if v > 0
-        ))
+            f"{k}: **{v}**" for k, v in votes.items() if v > 0))
 
         # ── Charts ──
         st.divider()
@@ -648,7 +759,8 @@ def render_live_scoring(vix_tuple, top10, sectors, oi_data):
                     autopct="%1.1f%%", colors=["#00e5a0", "#ff4444"],
                     textprops={"color": "white"})
         else:
-            ax1.text(0.5, 0.5, "No A-D data entered", ha="center", va="center", color="gray", fontsize=9)
+            ax1.text(0.5, 0.5, "No A-D data entered", ha="center", va="center",
+                     color="gray", fontsize=9)
         ax1.set_title("Advance-Decline", color="white")
 
         sec_u = sum(1 for v in sectors.values() if v and v > 0)
@@ -658,7 +770,8 @@ def render_live_scoring(vix_tuple, top10, sectors, oi_data):
                     autopct="%1.1f%%", colors=["#00e5a0", "#ff4444"],
                     textprops={"color": "white"})
         else:
-            ax2.text(0.5, 0.5, "No sector data", ha="center", va="center", color="gray", fontsize=9)
+            ax2.text(0.5, 0.5, "No sector data", ha="center", va="center",
+                     color="gray", fontsize=9)
         ax2.set_title("Sector Heatmap", color="white")
         f2.patch.set_facecolor("#0e1117")
         st.pyplot(f2); plt.close(f2)
@@ -673,6 +786,9 @@ def render_live_scoring(vix_tuple, top10, sectors, oi_data):
             "Score":      round(final_score, 1),
             "Signal":     trade["message"],
             "Delta":      trade["delta"],
+            "Strike":     (f"{pe_sell}PE" if trade_type == "BULLISH"
+                           else f"{ce_sell}CE" if trade_type == "BEARISH"
+                           else f"{pe_sell}PE + {ce_sell}CE") if not vix_blocked else "FLAT",
         })
 
     if st.session_state.get("history"):
@@ -829,21 +945,27 @@ if status == "live":
 elif status == "opening":
     st.warning("🟡 **Opening Phase (9:15–9:30 AM)** — Wait before trading. Checking data is fine.")
     render_data_cards(vix_tuple, top10, sectors, oi_data, "📡 Today's Opening Data")
+    render_live_scoring(vix_tuple, top10, sectors, oi_data)
 
 elif status == "closing":
     st.error("🔴 **After 3:20 PM — Square off ALL positions now. No new entries.**")
     render_data_cards(vix_tuple, top10, sectors, oi_data, "📅 Today's Session Data")
+    render_live_scoring(vix_tuple, top10, sectors, oi_data)
 
 elif status == "pre":
     st.info(f"🕐 **Pre-Market** — Market opens at 09:15 AM. Showing last session data.")
     day = last_trading_day_label()
     render_data_cards(vix_tuple, top10, sectors, oi_data, f"📅 Last Session Data ({day})")
+    st.info("📊 **Backtest / Planning Mode** — Enter yesterday's data below to simulate signals and strikes.")
+    render_live_scoring(vix_tuple, top10, sectors, oi_data)
 
 elif status in ("closed", "weekend"):
     label = "Weekend" if status == "weekend" else "Market Closed"
     st.info(f"🔒 **{label}** — Next session: {next_market_open()}")
     day = last_trading_day_label()
     render_data_cards(vix_tuple, top10, sectors, oi_data, f"📅 Last Session Data ({day})")
+    st.info("📊 **Backtest / Planning Mode** — Enter any historical data below to simulate signals and strikes.")
+    render_live_scoring(vix_tuple, top10, sectors, oi_data)
 
 # ── Footer ──
 st.divider()
