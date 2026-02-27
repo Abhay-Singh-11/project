@@ -1,4 +1,4 @@
-<<<<<<< HEAD
+
 def trading_signal(nifty_direction, pcr, adv_dec, sector_direction):
     signals = []
 
@@ -37,7 +37,6 @@ def trading_signal(nifty_direction, pcr, adv_dec, sector_direction):
 
 # Example usage
 adv_dec_data = {"advances": 30, "declines": 20}
-=======
 def trading_signal(nifty_direction, pcr, adv_dec, sector_direction):
     signals = []
 
